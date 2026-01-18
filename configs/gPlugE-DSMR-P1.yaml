@@ -1,0 +1,299 @@
+substitutions:
+  name: "gpluge"
+  friendly_name: "gPlugE Smart Meter"
+  project_name: "gpluge.smartmeter"
+  project_version: "1.0"
+  dns_domain: ".local"
+  timezone: "Europe/Zurich"
+  sntp_update_interval: "12h"
+  log_level: "INFO"
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+  project:
+    name: "${project_name}"
+    version: "${project_version}"
+  on_boot:
+    priority: 600
+    then:
+      - logger.log: "System startet, prüfe Netzwerk..."
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# --- NETZWERK (WT32-ETH01) ---
+ethernet:
+  type: LAN8720
+  mdc_pin: GPIO23
+  mdio_pin: GPIO18
+  clk_mode: GPIO0_IN
+  phy_addr: 1
+  power_pin: GPIO16
+  domain: "${dns_domain}"
+
+# --- SYSTEM & OTA ---
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+  version: 3
+  local: true
+  sorting_groups:
+    - id: group_total
+      name: "Total"
+      sorting_weight: 10
+    - id: group_l1
+      name: "Phase L1"
+      sorting_weight: 20
+    - id: group_l2
+      name: "Phase L2"
+      sorting_weight: 30
+    - id: group_l3
+      name: "Phase L3"
+      sorting_weight: 40
+    - id: group_diag
+      name: "Diagnose"
+      sorting_weight: 100
+  
+api:
+  reboot_timeout: 86400s
+
+logger:
+  level: ${log_level}
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "${timezone}"
+
+# --- HARDWARE DSMR (Ensor eRS801) ---
+uart:
+  id: uart_bus
+  rx_pin: GPIO5
+  baud_rate: 115200
+  rx_buffer_size: 1024
+
+dsmr:
+  id: my_dsmr
+  uart_id: uart_bus
+
+# --- SENSOREN ---
+sensor:
+  - platform: dsmr
+    # GRUPPE: TOTAL
+    power_delivered:
+      name: "Aktueller Verbrauch"
+      id: power_delivered_id
+      unit_of_measurement: "W"
+      icon: "mdi:transmission-tower-export"
+      accuracy_decimals: 0
+      web_server:
+        sorting_group_id: group_total
+        sorting_weight: 1
+      filters:
+        - multiply: 1000
+    power_returned:
+      name: "Aktuelle Einspeisung"
+      unit_of_measurement: "W"
+      icon: "mdi:transmission-tower-import"
+      accuracy_decimals: 0
+      web_server:
+        sorting_group_id: group_total
+        sorting_weight: 2
+      filters:
+        - multiply: 1000
+
+    energy_delivered_tariff1:
+      name: "Energie Bezug HT (1.8.1)"
+      id: energy_ht
+      icon: "mdi:counter"
+      accuracy_decimals: 3
+      web_server:
+        sorting_group_id: group_total
+        sorting_weight: 5
+    energy_delivered_tariff2:
+      name: "Energie Bezug NT (1.8.2)"
+      id: energy_nt
+      icon: "mdi:counter"
+      accuracy_decimals: 3
+      web_server:
+        sorting_group_id: group_total
+        sorting_weight: 6
+
+    # GRUPPE: PHASE L1
+    power_delivered_l1:
+      name: "Leistung L1"
+      unit_of_measurement: "W"
+      icon: "mdi:flash"
+      accuracy_decimals: 0
+      web_server:
+        sorting_group_id: group_l1
+        sorting_weight: 1
+      filters:
+        - multiply: 1000
+    voltage_l1:
+      name: "Spannung L1"
+      icon: "mdi:sine-wave"
+      accuracy_decimals: 1
+      web_server:
+        sorting_group_id: group_l1
+        sorting_weight: 2
+    current_l1:
+      name: "Strom L1"
+      icon: "mdi:current-ac"
+      accuracy_decimals: 1
+      web_server:
+        sorting_group_id: group_l1
+        sorting_weight: 3
+
+    # GRUPPE: PHASE L2
+    power_delivered_l2:
+      name: "Leistung L2"
+      unit_of_measurement: "W"
+      icon: "mdi:flash"
+      accuracy_decimals: 0
+      web_server:
+        sorting_group_id: group_l2
+        sorting_weight: 1
+      filters:
+        - multiply: 1000
+    voltage_l2:
+      name: "Spannung L2"
+      icon: "mdi:sine-wave"
+      accuracy_decimals: 1
+      web_server:
+        sorting_group_id: group_l2
+        sorting_weight: 2
+    current_l2:
+      name: "Strom L2"
+      icon: "mdi:current-ac"
+      accuracy_decimals: 1
+      web_server:
+        sorting_group_id: group_l2
+        sorting_weight: 3
+
+    # GRUPPE: PHASE L3
+    power_delivered_l3:
+      name: "Leistung L3"
+      unit_of_measurement: "W"
+      icon: "mdi:flash"
+      accuracy_decimals: 0
+      web_server:
+        sorting_group_id: group_l3
+        sorting_weight: 1
+      filters:
+        - multiply: 1000
+    voltage_l3:
+      name: "Spannung L3"
+      icon: "mdi:sine-wave"
+      accuracy_decimals: 1
+      web_server:
+        sorting_group_id: group_l3
+        sorting_weight: 2
+    current_l3:
+      name: "Strom L3"
+      icon: "mdi:current-ac"
+      accuracy_decimals: 1
+      web_server:
+        sorting_group_id: group_l3
+        sorting_weight: 3
+
+  # TOTAL-BERECHNUNG (1.8.0)
+  - platform: template
+    name: "Energie Bezug Total (1.8.0)"
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    icon: "mdi:sigma"
+    accuracy_decimals: 3
+    web_server:
+      sorting_group_id: group_total
+      sorting_weight: 3
+    lambda: |-
+      return id(energy_ht).state + id(energy_nt).state;
+
+  - platform: total_daily_energy
+    name: "Energie Bezug Heute"
+    power_id: power_delivered_id # Wir müssen dem Leistungssensor eine ID geben (siehe unten)
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 3
+    icon: "mdi:calendar-today"
+    device_class: energy
+    state_class: total_increasing
+    web_server:
+      sorting_group_id: group_total
+      sorting_weight: 4
+    filters:
+      # Da der Leistungssensor in Watt (W) vorliegt, rechnet ESPHome 
+      # dies intern korrekt in kWh um.
+      - multiply: 0.001
+
+# --- TEXT SENSOREN ---
+text_sensor:
+  - platform: dsmr
+    identification:
+      name: "Zähler ID"
+      icon: "mdi:barcode-scan"
+      web_server:
+        sorting_group_id: group_diag
+        sorting_weight: 1
+    # P1 Version wieder hinzugefügt
+    p1_version:
+      name: "P1 Protokoll Version"
+      icon: "mdi:information"
+      web_server:
+        sorting_group_id: group_diag
+        sorting_weight: 2
+    electricity_tariff:
+      id: tariff_raw
+      internal: true
+
+  # Tarifübersetzung (HT/NT) in Gruppe TOTAL
+  - platform: template
+    name: "Aktueller Tarif"
+    icon: "mdi:cash-multiple"
+    web_server:
+      sorting_group_id: group_total
+      sorting_weight: 2
+    lambda: |-
+      std::string t = id(tariff_raw).state;
+      if (t == "0001" || t == "1") return {"Hochtarif (HT)"};
+      if (t == "0002" || t == "2") return {"Niedertarif (NT)"};
+      return {"Warte auf Daten..."};
+    update_interval: 10s
+
+  - platform: version
+    name: "ESPHome Version"
+    icon: "mdi:alpha-v-circle-outline"
+    web_server:
+      sorting_group_id: group_diag
+      sorting_weight: 20
+
+  - platform: template
+    name: "Ethernet IP-Adresse"
+    icon: "mdi:ip-network"
+    web_server:
+      sorting_group_id: group_diag
+      sorting_weight: 10
+    lambda: |-
+      if (network::is_connected()) {
+        return { network::get_ip_addresses()[0].str() };
+      } else {
+        return {"Nicht verbunden"};
+      }
+    update_interval: 30s
+
+  - platform: template
+    name: "Ethernet MAC-Adresse"
+    icon: "mdi:fingerprint"
+    web_server:
+      sorting_group_id: group_diag
+      sorting_weight: 11
+    lambda: |-
+      return { get_mac_address_pretty() };
+    update_interval: 1d
+
