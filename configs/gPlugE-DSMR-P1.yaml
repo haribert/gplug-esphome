@@ -1,23 +1,52 @@
+# gPlugE mit WT32-ETH01 für DSMR/P1
+#
+# Datum:    2025.01.20
+# Version:  1.2
+#
+# Im Idealfall muss einzig der Bereich `substitutions` angepasst werden.
 substitutions:
-  name: "gpluge"
-  friendly_name: "gPlugE Smart Meter"
-  project_name: "gpluge.smartmeter"
-  project_version: "1.0"
+  devicename: "gpluge"
+  friendly_name: "gPlugE - Stromzähler"
+  purpose: "Stromzähler auslesen"
+  project_name: "esphome.gplug"
+  project_version: "1.2"
   dns_domain: ".local"
   timezone: "Europe/Zurich"
   sntp_update_interval: "12h"
   log_level: "INFO"
+  # Passwort für Webzugriff
+  # Damit nicht jeder mit Netzwerkzugang eine neue Firmware flashen kann
+  web_server_user: admin
+  web_server_password: !secret web_server_password
+  # OTA Update - Over the Air Update
+  # ================================
+  # Substitutions innerhalb von !secret werden nicht aufgelöst, weswegen der Devicenamen eingetragen werden muss.
+  current_ota_password: !secret "gpluge_ota_password"
+  # Falls man ein neues ota Passwort setzen will, kann dies hier eingetragen werden.
+  # Beim Neustart wird das neue Passwort gesetzt, vorausgesetzt das `new_ota_password` unterscheidet sich vom `current_ota_password`
+  # Im Anschluss darf nicht vergessen werden, dass man das `current_ota_password` auf das neue Passwort setzt,
+  # ansonsten funktioniert das nächste Update nicht.
+  new_ota_password: !secret ota_password
 
 esphome:
-  name: "${name}"
+  name: "${devicename}"
   friendly_name: "${friendly_name}"
+  comment: "${purpose}"
   project:
     name: "${project_name}"
     version: "${project_version}"
   on_boot:
-    priority: 600
-    then:
-      - logger.log: "System startet, prüfe Netzwerk..."
+    # Passwort ändern - hier wird das neue Passwort eingefügt aber nur wenn sich dieses unterscheidet
+    - priority: -10
+      then:
+      - lambda: |-
+          // Direkter Vergleich der C-Strings spart RAM
+          if (strcmp("${current_ota_password}", "${new_ota_password}") != 0) {
+            ESP_LOGI("ota_update", "OTA Passwörter unterschiedlich. Setze neues Passwort...");
+            id(ota_component).set_auth_password("${new_ota_password}");
+          } else {
+            ESP_LOGI("ota_update", "OTA Passwörter sind identisch. Keine Änderung nötig.");
+          }
 
 esp32:
   board: esp32dev
@@ -34,14 +63,22 @@ ethernet:
   power_pin: GPIO16
   domain: "${dns_domain}"
 
-# --- SYSTEM & OTA ---
 ota:
   - platform: esphome
+    # Eine feste ID für alle Geräte erleichtert das Lambda
+    id: ota_component
+    # Hier ist das bestehende, alte Passwort.
+    # Wenn das Passwort nicht ändert, sind "new_ota_password" und "current_ota_password" identisch
+    password: ${current_ota_password}
+  - platform: web_server
 
 web_server:
   port: 80
   version: 3
   local: true
+  auth:
+    username: ${web_server_user}
+    password: ${web_server_password}
   sorting_groups:
     - id: group_total
       name: "Total"
@@ -55,11 +92,22 @@ web_server:
     - id: group_l3
       name: "Phase L3"
       sorting_weight: 40
+    - id: group_net
+      name: "Netzqualität"
+      sorting_weight: 50
+    - id: group_meter
+      name: "Stromzähler"
+      sorting_weight: 60
     - id: group_diag
-      name: "Diagnose"
-      sorting_weight: 100
-  
+      name: "${friendly_name}"
+      sorting_weight: 70
+
+# Enable Home Assistant API
 api:
+  encryption:
+    key: !secret api_key
+  # Falls keine Verbindung zu Home Assistant besteht, wird das Gerät nach 24h neu gestartet
+  # Um einen Neustart zu verhindern, muss dieser Wert auf 0s gesetzt werden
   reboot_timeout: 86400s
 
 logger:
@@ -70,21 +118,19 @@ time:
     id: sntp_time
     timezone: "${timezone}"
 
-# --- HARDWARE DSMR (Ensor eRS801) ---
 uart:
   id: uart_bus
   rx_pin: GPIO5
   baud_rate: 115200
-  rx_buffer_size: 1024
+  rx_buffer_size: 2048
 
 dsmr:
   id: my_dsmr
   uart_id: uart_bus
 
-# --- SENSOREN ---
 sensor:
   - platform: dsmr
-    # GRUPPE: TOTAL
+    # --- GRUPPE: TOTAL ---
     power_delivered:
       name: "Aktueller Verbrauch"
       id: power_delivered_id
@@ -93,62 +139,92 @@ sensor:
       accuracy_decimals: 0
       web_server:
         sorting_group_id: group_total
-        sorting_weight: 1
-      filters:
-        - multiply: 1000
-    power_returned:
-      name: "Aktuelle Einspeisung"
-      unit_of_measurement: "W"
-      icon: "mdi:transmission-tower-import"
-      accuracy_decimals: 0
-      web_server:
-        sorting_group_id: group_total
-        sorting_weight: 2
+        sorting_weight: 10
       filters:
         - multiply: 1000
 
     energy_delivered_tariff1:
       name: "Energie Bezug HT (1.8.1)"
       id: energy_ht
+      unit_of_measurement: "kWh"
       icon: "mdi:counter"
       accuracy_decimals: 3
       web_server:
         sorting_group_id: group_total
-        sorting_weight: 5
+        sorting_weight: 50
+
     energy_delivered_tariff2:
       name: "Energie Bezug NT (1.8.2)"
       id: energy_nt
+      unit_of_measurement: "kWh"
       icon: "mdi:counter"
       accuracy_decimals: 3
       web_server:
         sorting_group_id: group_total
-        sorting_weight: 6
+        sorting_weight: 60
 
+    # --- GRUPPE: NETZQUALITÄT ---
+    electricity_long_failures:
+      name: "Anzahl lange Stromausfälle"
+      icon: "mdi:alert-rhombus"
+      web_server:
+        sorting_group_id: group_net
+        sorting_weight: 10
+
+    # Spannungseinbrüche (Sags)
+    electricity_sags_l1:
+      name: "Spannungseinbrüche L1 (Sags)"
+      icon: "mdi:trending-down"
+      web_server:
+        sorting_group_id: group_net
+    electricity_sags_l2:
+      name: "Spannungseinbrüche L2 (Sags)"
+      icon: "mdi:trending-down"
+      web_server:
+        sorting_group_id: group_net
+    electricity_sags_l3:
+      name: "Spannungseinbrüche L3 (Sags)"
+      icon: "mdi:trending-down"
+      web_server:
+        sorting_group_id: group_net
+
+    # Spannungsspitzen (Swells)
+    electricity_swells_l1:
+      name: "Spannungsspitzen L1 (Swells)"
+      icon: "mdi:trending-up"
+      web_server:
+        sorting_group_id: group_net
+    electricity_swells_l2:
+      name: "Spannungsspitzen L2 (Swells)"
+      icon: "mdi:trending-up"
+      web_server:
+        sorting_group_id: group_net
+    electricity_swells_l3:
+      name: "Spannungsspitzen L3 (Swells)"
+      icon: "mdi:trending-up"
+      web_server:
+        sorting_group_id: group_net
+
+    # --- PHASEN-WERTE ---
     # GRUPPE: PHASE L1
     power_delivered_l1:
       name: "Leistung L1"
       unit_of_measurement: "W"
       icon: "mdi:flash"
       accuracy_decimals: 0
-      web_server:
-        sorting_group_id: group_l1
-        sorting_weight: 1
+      web_server: {sorting_group_id: group_l1, sorting_weight: 10}
       filters:
         - multiply: 1000
     voltage_l1:
       name: "Spannung L1"
       icon: "mdi:sine-wave"
       accuracy_decimals: 1
-      web_server:
-        sorting_group_id: group_l1
-        sorting_weight: 2
+      web_server: {sorting_group_id: group_l1, sorting_weight: 20}
     current_l1:
       name: "Strom L1"
       icon: "mdi:current-ac"
       accuracy_decimals: 1
-      web_server:
-        sorting_group_id: group_l1
-        sorting_weight: 3
+      web_server: {sorting_group_id: group_l1, sorting_weight: 30}
 
     # GRUPPE: PHASE L2
     power_delivered_l2:
@@ -156,25 +232,19 @@ sensor:
       unit_of_measurement: "W"
       icon: "mdi:flash"
       accuracy_decimals: 0
-      web_server:
-        sorting_group_id: group_l2
-        sorting_weight: 1
+      web_server: {sorting_group_id: group_l2, sorting_weight: 10}
       filters:
         - multiply: 1000
     voltage_l2:
       name: "Spannung L2"
       icon: "mdi:sine-wave"
       accuracy_decimals: 1
-      web_server:
-        sorting_group_id: group_l2
-        sorting_weight: 2
+      web_server: {sorting_group_id: group_l2, sorting_weight: 20}
     current_l2:
       name: "Strom L2"
       icon: "mdi:current-ac"
       accuracy_decimals: 1
-      web_server:
-        sorting_group_id: group_l2
-        sorting_weight: 3
+      web_server: {sorting_group_id: group_l2, sorting_weight: 30}
 
     # GRUPPE: PHASE L3
     power_delivered_l3:
@@ -182,43 +252,31 @@ sensor:
       unit_of_measurement: "W"
       icon: "mdi:flash"
       accuracy_decimals: 0
-      web_server:
-        sorting_group_id: group_l3
-        sorting_weight: 1
+      web_server: {sorting_group_id: group_l3, sorting_weight: 10}
       filters:
         - multiply: 1000
     voltage_l3:
       name: "Spannung L3"
       icon: "mdi:sine-wave"
       accuracy_decimals: 1
-      web_server:
-        sorting_group_id: group_l3
-        sorting_weight: 2
+      web_server: {sorting_group_id: group_l3, sorting_weight: 20}
     current_l3:
       name: "Strom L3"
       icon: "mdi:current-ac"
       accuracy_decimals: 1
-      web_server:
-        sorting_group_id: group_l3
-        sorting_weight: 3
+      web_server: {sorting_group_id: group_l3, sorting_weight: 30}
 
-  # TOTAL-BERECHNUNG (1.8.0)
-  - platform: template
-    name: "Energie Bezug Total (1.8.0)"
-    unit_of_measurement: "kWh"
-    device_class: energy
-    state_class: total_increasing
-    icon: "mdi:sigma"
-    accuracy_decimals: 3
+  # --- SYSTEM DIAGNOSE ---
+  - platform: internal_temperature
+    name: "CPU Temperatur"
+    icon: "mdi:thermometer"
     web_server:
-      sorting_group_id: group_total
-      sorting_weight: 3
-    lambda: |-
-      return id(energy_ht).state + id(energy_nt).state;
+      sorting_group_id: group_diag
+      sorting_weight: 10
 
   - platform: total_daily_energy
     name: "Energie Bezug Heute"
-    power_id: power_delivered_id # Wir müssen dem Leistungssensor eine ID geben (siehe unten)
+    power_id: power_delivered_id
     unit_of_measurement: "kWh"
     accuracy_decimals: 3
     icon: "mdi:calendar-today"
@@ -226,74 +284,123 @@ sensor:
     state_class: total_increasing
     web_server:
       sorting_group_id: group_total
-      sorting_weight: 4
+      sorting_weight: 30
     filters:
-      # Da der Leistungssensor in Watt (W) vorliegt, rechnet ESPHome 
-      # dies intern korrekt in kWh um.
       - multiply: 0.001
 
-# --- TEXT SENSOREN ---
+  - platform: template
+    name: "Energie Bezug Total (1.8.0)"
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 3
+    icon: "mdi:sigma"
+    device_class: energy
+    state_class: total_increasing
+    lambda: |-
+      if (std::isnan(id(energy_ht).state) || std::isnan(id(energy_nt).state)) {
+        return {};
+      }
+      return id(energy_ht).state + id(energy_nt).state;
+    update_interval: 10s
+    web_server:
+      sorting_group_id: group_total
+      sorting_weight: 40
+
 text_sensor:
   - platform: dsmr
+    # --- GRUPPE: STROMZÄHLER ---
     identification:
-      name: "Zähler ID"
+      name: "Zähler Identifikation"
       icon: "mdi:barcode-scan"
       web_server:
-        sorting_group_id: group_diag
-        sorting_weight: 1
-    # P1 Version wieder hinzugefügt
+        sorting_group_id: group_meter
+        sorting_weight: 10
     p1_version:
       name: "P1 Protokoll Version"
       icon: "mdi:information"
       web_server:
-        sorting_group_id: group_diag
-        sorting_weight: 2
+        sorting_group_id: group_meter
+        sorting_weight: 20
     electricity_tariff:
       id: tariff_raw
-      internal: true
+      name: "Tarif Rohwert"
+      icon: "mdi:tag-outline"
+      web_server:
+        sorting_group_id: group_meter
+        sorting_weight: 30
 
-  # Tarifübersetzung (HT/NT) in Gruppe TOTAL
+    # --- GRUPPE: NETZQUALITÄT ---
+    electricity_failure_log:
+      name: "Fehlerprotokoll Netz"
+      icon: "mdi:history"
+      web_server:
+        sorting_group_id: group_net
+        sorting_weight: 100
+
   - platform: template
     name: "Aktueller Tarif"
     icon: "mdi:cash-multiple"
     web_server:
       sorting_group_id: group_total
-      sorting_weight: 2
+      sorting_weight: 20
+    # Bei meinem Sensor entspricht der Wert 5431 Hochtarif und 5432 Niedertarif.
+    # Falls dein Sensor hier weiterhin "Warte auf P1 Daten..." ausgibt,
+    # kann der aktuelle Rohwert vom Tarif unter `Tarif Rohwert` eingesehen werden.
     lambda: |-
       std::string t = id(tariff_raw).state;
-      if (t == "0001" || t == "1") return {"Hochtarif (HT)"};
-      if (t == "0002" || t == "2") return {"Niedertarif (NT)"};
-      return {"Warte auf Daten..."};
-    update_interval: 10s
+      if (t == "0001" || t == "1" || t == "5431") return {"Hochtarif (HT)"};
+      if (t == "0002" || t == "2" || t == "5432") return {"Niedertarif (NT)"};
+      if (t.empty()) return {"Warte auf P1 Daten..."};
+      return {"Unbekannt: " + t};
+    update_interval: 5s
 
+  # --- GRUPPE: DIAGNOSE GERÄT (gPlugE) ---
   - platform: version
     name: "ESPHome Version"
+    id: ${devicename}_esp_version
+    hide_timestamp: true
     icon: "mdi:alpha-v-circle-outline"
     web_server:
       sorting_group_id: group_diag
       sorting_weight: 20
+    # Die Version wird im Format esphome-<ESPHOME-Version> - <BUILDDATE: YYYYMMDD_HHMMSS> ausgegeben.
+    filters:
+      - lambda: |-
+          // 1. Version holen (z.B. 2025.12.7)
+          std::string version = x;
 
-  - platform: template
-    name: "Ethernet IP-Adresse"
-    icon: "mdi:ip-network"
-    web_server:
-      sorting_group_id: group_diag
-      sorting_weight: 10
-    lambda: |-
-      if (network::is_connected()) {
-        return { network::get_ip_addresses()[0].str() };
-      } else {
-        return {"Nicht verbunden"};
-      }
-    update_interval: 30s
+          // 2. Build-Datum (__DATE__) parsen (Format ist immer "Mmm dd yyyy")
+          char m_str[4];
+          int day, year;
+          static const char month_names[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+          sscanf(__DATE__, "%s %d %d", m_str, &day, &year);
+          
+          // Monat von Text in Zahl umwandeln
+          int month = (strstr(month_names, m_str) - month_names) / 3 + 1;
+
+          // 3. Build-Uhrzeit (__TIME__) parsen (Format ist "hh:mm:ss")
+          int hour, min, sec;
+          sscanf(__TIME__, "%d:%d:%d", &hour, &min, &sec);
+
+          // 4. In Zielformat schreiben: YYYYMMDD_HHMMSS
+          char buf[20];
+          sprintf(buf, "%04d%02d%02d_%02d%02d%02d", year, month, day, hour, min, sec);
+
+          return {"esphome-" + version + " - " + std::string(buf)};
+
+  - platform: ethernet_info
+    ip_address:
+      name: "Ethernet IP-Adresse"
+      icon: "mdi:ip-network"
+      web_server:
+        sorting_group_id: group_diag
+        sorting_weight: 30
 
   - platform: template
     name: "Ethernet MAC-Adresse"
     icon: "mdi:fingerprint"
     web_server:
       sorting_group_id: group_diag
-      sorting_weight: 11
+      sorting_weight: 40
     lambda: |-
       return { get_mac_address_pretty() };
     update_interval: 1d
-
