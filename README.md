@@ -1,4 +1,4 @@
-# ESPHome Smart Meter Reader für gPlugE (WT32-ETH01)
+# ESPHome Konfiguration um den Stromzähler mit dem gPlugE IoT-Adapter auszulesen.
 
 Dieses Repository enthält ESPHome-Konfiguration für das **gPlugE** Modul. Basierend auf dem **WT32-ETH01** (ESP32 mit nativem Ethernet) ist dieses Setup speziell für das Auslesen von Smart Metern über die P1-Kundenschnittstelle mittels des DSMR-Protokolls konzipiert.
 
