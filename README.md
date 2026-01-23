@@ -94,7 +94,6 @@ Solltet ihr einen anderen gPlug oder Stromzähler im Einsatz und die ESPHome Kon
 
 ## 🔗 Relevante Ressourcen & Links
 *   **Hersteller gPlug:** [gplug.ch](https://gplug.ch)
-*   **Installationsanleitung gPlugE:** [Anleitung ansehen](https://gplug.ch)
 *   **Ensor Smart Meter Produkte:** [ensor.com](https://www.ensor.com)
 *   **ESPHome Dokumentation:** [DSMR Sensor](https://esphome.io) | [Ethernet Component](https://esphome.io)
 *   **Tasmota Dokumentation:** [SML Interface](https://tasmota.github.io) (für Vergleichszwecke)
