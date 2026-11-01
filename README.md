@@ -2,6 +2,11 @@
 
 Dieses Repository enthält ESPHome-Konfiguration für das **gPlugE** Modul. Basierend auf dem **WT32-ETH01** (ESP32 mit nativem Ethernet) ist dieses Setup speziell für das Auslesen von Smart Metern über die P1-Kundenschnittstelle mittels des DSMR-Protokolls konzipiert.
 
+| Konfiguration | gPlug | Schnittstelle / Protokoll | Zähler |
+|---|---|---|---|
+| [gPlugE-DSMR-P1.yaml](configs/gPlugE-DSMR-P1.yaml) | gPlugE (WT32-ETH01, Ethernet) | P1 / DSMR | Ensor eRS801 u.a. |
+| [gPlugM-DLMS-E450.yaml](configs/gPlugM-DLMS-E450.yaml) | gPlugM (ESP32-C3, WLAN) | M-Bus CII / DLMS-COSEM | Landis+Gyr E450 / E570 – siehe [gPlugM](#-gplugm-m-bus--dlms-zb-landisgyr-e450) |
+
 ## 🚀 Warum ESPHome statt Tasmota?
 Die Migration von Tasmota zu ESPHome bietet signifikante Vorteile für moderne Smart-Home-Umgebungen:
 
@@ -89,12 +94,83 @@ Smart Meter geben den aktuellen Tarif über die P1-Schnittstelle oft als numeris
 *   **Invertierung:** Je nach Zählermodell und verwendetem Lesekopf muss das Signal invertiert werden. Die Konfiguration nutzt den Standard-UART-Modus. Sollten keine Daten ankommen, prüfen Sie, ob Ihr Lesekopf eine Hardware-Invertierung besitzt oder ob der `rx_pin` im YAML auf `inverted: true` gesetzt werden muss.
 *   **Baudrate:** Der Standard für DSMR ist 115.200 Baud. Ältere Zähler (z. B. nach DSMR 2.x oder 3.x Standard) benötigen eventuell eine Reduktion auf 9.600 Baud.
 
+## 🔌 gPlugM (M-Bus / DLMS, z.B. Landis+Gyr E450)
+
+> **Stand:** Die Konfiguration kompiliert (ESPHome 2026.9.1). Die Skalierung von Strom und M-Bus-Wert ist noch nicht an einem realen Zähler bestätigt – bitte die ersten Werte mit der Zähleranzeige vergleichen.
+
+Der [gPlugM](https://gplug.ch/produkte/gplugm/) wird mit dem RJ12-Kabel an die **M-Bus-Kundenschnittstelle (CII)** eines Landis+Gyr E450 oder E570 angeschlossen und von dieser auch gespeist. Der Zähler sendet DLMS/COSEM-Telegramme, die ESPHome mit der eingebauten Komponente [`dlms_meter`](https://esphome.io/components/sensor/dlms_meter/) dekodiert.
+
+### Hardware
+| | |
+|---|---|
+| **Chip** | ESP32-C3 (USB-C, WLAN 2.4 GHz) |
+| **Schnittstelle** | M-Bus CII, 2400 Baud, 8E1, RX auf **GPIO7** |
+| **RGB-LED** | rot GPIO1, grün GPIO4, blau GPIO3 (blau = Status-LED) |
+| **Taster** | GPIO9 |
+| **Speisung** | über den M-Bus des Zählers (nur wenig Strom: WLAN läuft im Stromsparmodus) |
+
+### Voraussetzungen
+*   **Kundenschnittstelle freischalten:** Die CII ist ab Werk deaktiviert und muss beim Netzbetreiber (z.B. Kundendienst ewb) aktiviert werden.
+*   **Verschlüsselung:** Je nach Netzbetreiber sind die Daten AES-verschlüsselt. Den Schlüssel (32 Hex-Zeichen) liefert der Netzbetreiber; bei einem gPlugM mit Tasmota steht er im Script als `dKEY="..."`. **Vor dem Flashen notieren** – er geht sonst verloren. Ein leeres `dKEY=""` bedeutet: unverschlüsselt.
+
+### Konfiguration
+Die Datei [gPlugM-DLMS-E450.yaml](configs/gPlugM-DLMS-E450.yaml) ist auf **ewb (Energie Wasser Bern)** voreingestellt. Für andere Netzbetreiber genügen in der Regel die `substitutions`:
+
+| Substitution | Standard (ewb) | Bedeutung |
+|---|---|---|
+| `obis_energy_channel` | `1.1` | Kanal der Energiezähler. ewb liefert `1-1:1.8.x`, viele andere `1-0:1.8.x` → `1.0` |
+| `obis_mbus_water` | `0.1.24.2.1.255` | M-Bus-Gerät am Zähler, Kanal 1 (`0-1:24.2.1`). Andere Netzbetreiber nutzen z.B. Kanal 2 |
+| `mbus_water_factor` | `0.001` | Rohwert → m³ (Liter → m³) |
+
+Zusätzlich zur `secrets.yaml` oben braucht der gPlugM:
+
+```yaml
+# WLAN (der gPlugM hat kein Ethernet)
+wifi_ssid: "DeinWLAN"
+wifi_password: "DeinWLANPasswort"
+
+# Das aktuell auf dem gPlugM befindliche OTA-Passwort (bei Erstinstallation = ota_password)
+gplugm_ota_password: "DeinAltesPasswort"
+
+# Nur bei verschlüsselter Kundenschnittstelle (und `decryption_key` im YAML aktivieren)
+gplugm_decryption_key: "0123456789ABCDEF0123456789ABCDEF"
+```
+
+### Flashen
+Tasmota und ESPHome verwenden auf dem ESP32-C3 eine unterschiedliche Flash-Aufteilung, ein Update über das Tasmota-Webinterface ist deshalb **nicht möglich**. Die Erstinstallation erfolgt einmalig über **USB-C** (der gPlugM hat einen eingebauten USB-Anschluss, kein Adapter nötig):
+
+1.  Schlüssel (`dKEY`) aus Tasmota sichern, siehe oben.
+2.  gPlugM vom Zähler trennen und per USB-C mit dem Computer verbinden.
+3.  `esphome run gPlugM-DLMS-E450.yaml` (oder [ESPHome Web Tool](https://web.esphome.io)) und den USB-Port des gPlugM wählen.
+4.  Wieder an den Zähler anschliessen. Alle weiteren Updates laufen über WLAN.
+
+### Angezeigte Informationen & Sensoren
+| Intervall | Werte |
+|---|---|
+| 5 s | Aktueller Verbrauch und Einspeisung (W), Strom L1–L3 (A), Blindleistung (var), Energie Bezug/Einspeisung Total (kWh) |
+| 60 s | Energie Bezug und Einspeisung HT/NT (kWh) |
+| 15 min (:00, :15, :30, :45) | Wasser (m³) bzw. das M-Bus-Gerät am Zähler |
+| – | Energie Bezug Heute, Zähler Identifikation, Zählerzeit, CPU Temperatur, WLAN-Signal, IP & MAC |
+
+Der E450 liefert (zumindest bei ewb) **keine Spannungen**, darum fehlen sie in dieser Konfiguration.
+
+### Fehlersuche
+*   **Keine Werte:** `log_level` auf `VERBOSE` und unter `logger: logs:` `dlms_meter: VERBOSE` setzen. Das Log zeigt dann jede empfangene OBIS-Kennzahl – so findet man auch Kanal und Skalierung des M-Bus-Geräts.
+*   **Unlesbare Telegramme:** Die Schnittstelle ist verschlüsselt → `decryption_key` setzen.
+*   **Energiewerte fehlen, Leistung kommt:** `obis_energy_channel` von `1.1` auf `1.0` ändern (oder umgekehrt).
+*   **Werte um Faktor 10/100/1000 falsch:** Filter (`multiply`) bzw. `mbus_water_factor` anpassen.
+
+### Quellen
+*   Pinbelegung und Schnittstellenparameter: [jluthiger/esphome-gplug](https://github.com/jluthiger/esphome-gplug)
+*   OBIS-Kennzahlen von ewb: [jmesserli/ewb-smartmeter-homeassistant](https://github.com/jmesserli/ewb-smartmeter-homeassistant)
+*   Wasserzähler über den E450: [dr-wiechert/gPlugM-LuGe450-homeassistant](https://github.com/dr-wiechert/gPlugM-LuGe450-homeassistant)
+
 ## 🤝 Beteiligung
 Solltet ihr einen anderen gPlug oder Stromzähler im Einsatz und die ESPHome Konfiguration dazu erstellt haben, könnt/sollt/dürft ihr diese gerne hier teilen. Entweder als Pull-Request oder ihr schickt es mir per Email an `haribert`at`gmx`dot`ch`, dann nehme ich diese unter `configs` auf.
 
 ## 🔗 Relevante Ressourcen & Links
 *   **Hersteller gPlug:** [gplug.ch](https://gplug.ch)
 *   **Ensor Smart Meter Produkte:** [ensor.com](https://www.ensor.com)
-*   **ESPHome Dokumentation:** [DSMR Sensor](https://esphome.io) | [Ethernet Component](https://esphome.io)
+*   **ESPHome Dokumentation:** [DSMR Sensor](https://esphome.io) | [Ethernet Component](https://esphome.io) | [DLMS Meter](https://esphome.io/components/sensor/dlms_meter/)
 *   **Tasmota Dokumentation:** [SML Interface](https://tasmota.github.io) (für Vergleichszwecke)
 
