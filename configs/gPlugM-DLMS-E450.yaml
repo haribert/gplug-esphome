@@ -1,0 +1,491 @@
+# gPlugM (ESP32-C3) für Landis+Gyr E450 / E570 an der M-Bus-Kundenschnittstelle (CII)
+#
+# Datum:    2026.11.01
+# Version:  1.1
+#
+# Der Zähler sendet alle ~10 s ein DLMS/COSEM-Telegramm mit 2400 Baud 8E1 (je nach Netzbetreiber
+# AES-verschlüsselt, bei ewb unverschlüsselt). Das Telegramm ist "selbstbeschreibend": zuerst die
+# Liste aller OBIS-Kennzahlen, danach alle Werte. Ohne Skalierung, die Rohwerte sind:
+# Energie in Wh, Leistung in W, Spannung in V, Strom in 0.01 A.
+#
+# ESPHome kann dieses Format erst ab Version 2026.11 dekodieren (dlms_parser >= 1.2), siehe README.
+#
+# Erstellt und getestet mit einem L+G E450 bei ewb (Energie Wasser Bern).
+# Im Idealfall muss einzig der Bereich `substitutions` angepasst werden.
+substitutions:
+  devicename: "gplugm"
+  friendly_name: "gPlugM - Smartmeter"
+  purpose: "Stromzähler auslesen"
+  project_name: "esphome.gplug"
+  project_version: "1.1"
+  timezone: "Europe/Zurich"
+  log_level: "INFO"
+  # Passwort für Webzugriff
+  # Damit nicht jeder mit Netzwerkzugang eine neue Firmware flashen kann
+  web_server_user: admin
+  web_server_password: !secret web_server_password
+  # OTA Update - Over the Air Update
+  # ================================
+  # Substitutions innerhalb von !secret werden nicht aufgelöst, weswegen der Devicenamen eingetragen werden muss.
+  current_ota_password: !secret "gplugm_ota_password"
+  # Falls man ein neues ota Passwort setzen will, kann dies hier eingetragen werden.
+  # Beim Neustart wird das neue Passwort gesetzt, vorausgesetzt das `new_ota_password` unterscheidet sich vom `current_ota_password`
+  new_ota_password: !secret ota_password
+
+  # Netzbetreiber-abhängige OBIS-Kennzahlen
+  # =======================================
+  # Kanal (B-Feld) der Energiezähler: ewb liefert sie als 1-1:1.8.0, viele andere als 1-0:1.8.0.
+  # Kommen keine Energiewerte an, auf "1.0" ändern (oder das VERBOSE-Log prüfen, siehe README).
+  obis_energy_channel: "1.1"
+
+esphome:
+  name: "${devicename}"
+  friendly_name: "${friendly_name}"
+  comment: "${purpose}"
+  # Erst ab 2026.11 kann dlms_meter das selbstbeschreibende Telegramm des E450 dekodieren.
+  # Mit älteren Versionen sind alle Werte 0.
+  min_version: 2026.11.0
+  project:
+    name: "${project_name}"
+    version: "${project_version}"
+  on_boot:
+    # Passwort ändern - hier wird das neue Passwort eingefügt aber nur wenn sich dieses unterscheidet
+    - priority: -10
+      then:
+      - lambda: |-
+          // Direkter Vergleich der C-Strings spart RAM
+          if (strcmp("${current_ota_password}", "${new_ota_password}") != 0) {
+            ESP_LOGI("ota_update", "OTA Passwörter unterschiedlich. Setze neues Passwort...");
+            id(ota_component).set_auth_password("${new_ota_password}");
+          } else {
+            ESP_LOGI("ota_update", "OTA Passwörter sind identisch. Keine Änderung nötig.");
+          }
+
+esp32:
+  board: esp32-c3-devkitm-1
+  # Der M-Bus liefert dauerhaft nur 10 mA bei 24 V (240 mW). Wie das Tasmota-Script des gPlugM
+  # mit 80 MHz statt 160 MHz takten, das spart rund einen Drittel Strom.
+  cpu_frequency: 80MHZ
+  framework:
+    type: esp-idf
+
+# --- NETZWERK (WLAN, der gPlugM hat kein Ethernet) ---
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Der gPlugM wird über den M-Bus des Zählers gespeist, der nur wenig Strom liefert.
+  # Mit "light" bleibt der Verbrauch des ESP32-C3 im erlaubten Rahmen.
+  power_save_mode: light
+  # Fallback-Hotspot, falls das WLAN nicht erreichbar ist
+  ap:
+    ssid: "${devicename} Fallback"
+    password: !secret ota_password
+
+captive_portal:
+
+ota:
+  - platform: esphome
+    # Eine feste ID für alle Geräte erleichtert das Lambda
+    id: ota_component
+    # Hier ist das bestehende, alte Passwort.
+    # Wenn das Passwort nicht ändert, sind "new_ota_password" und "current_ota_password" identisch
+    password: ${current_ota_password}
+  - platform: web_server
+
+web_server:
+  port: 80
+  version: 3
+  local: true
+  auth:
+    username: ${web_server_user}
+    password: ${web_server_password}
+  sorting_groups:
+    - id: group_total
+      name: "Total"
+      sorting_weight: 10
+    - id: group_phases
+      name: "Phasen"
+      sorting_weight: 20
+    - id: group_meter
+      name: "Stromzähler"
+      sorting_weight: 60
+    - id: group_diag
+      name: "${friendly_name}"
+      sorting_weight: 70
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_key
+  # Falls keine Verbindung zu Home Assistant besteht, wird das Gerät nach 24h neu gestartet
+  # Um einen Neustart zu verhindern, muss dieser Wert auf 0s gesetzt werden
+  reboot_timeout: 86400s
+
+logger:
+  level: ${log_level}
+  logs:
+    # Für die Fehlersuche (welche OBIS-Kennzahlen sendet mein Zähler?) `log_level` auf "VERBOSE"
+    # und diese Zeile auf VERBOSE setzen - danach wieder zurückstellen.
+    dlms_meter: INFO
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "${timezone}"
+
+# --- M-BUS KUNDENSCHNITTSTELLE ---
+# Pins des gPlugM: RX GPIO7, RGB-LED rot GPIO1 / grün GPIO4 / blau GPIO3, Taster GPIO9
+uart:
+  id: uart_bus
+  # Wie im Tasmota-Script des gPlugM (1,=so2,0C): Eingang invertiert, ohne Pull-up
+  rx_pin:
+    number: GPIO7
+    inverted: true
+    mode:
+      input: true
+      pullup: false
+  baud_rate: 2400
+  data_bits: 8
+  parity: EVEN
+  stop_bits: 1
+  # Ein Telegramm umfasst rund 700 Bytes
+  rx_buffer_size: 2048
+
+dlms_meter:
+  id: my_dlms
+  uart_id: uart_bus
+  # Ein Telegramm dauert bei 2400 Baud rund 3 s. Um hh:58:14 und hh:58:44 legt der E450 mitten im
+  # Telegramm eine Pause von über 1 s ein. Mit dem Standardwert (1000 ms) wird die erste Hälfte allein
+  # ausgewertet und alle Werte sind 0 - Home Assistant hält das für einen Zählerwechsel und verbucht
+  # den ganzen Zählerstand als Verbrauch. Das nächste Telegramm kommt erst nach 10 s, 3 s reicht.
+  receive_timeout: 3s
+  # Verschlüsselte Kundenschnittstelle: Schlüssel (32 Hex-Zeichen) vom Netzbetreiber bzw. aus dem
+  # Tasmota-Script (dKEY="...") in die secrets.yaml eintragen und diese Zeile aktivieren.
+  # decryption_key: !secret gplugm_decryption_key
+
+# Blaue LED zeigt den Verbindungsstatus (blinkt bei Problemen)
+status_led:
+  pin: GPIO3
+
+binary_sensor:
+  - platform: gpio
+    name: "Taster"
+    icon: "mdi:gesture-tap-button"
+    pin:
+      number: GPIO9
+      inverted: true
+      mode: INPUT_PULLUP
+    web_server:
+      sorting_group_id: group_diag
+      sorting_weight: 50
+
+sensor:
+  # --- GRUPPE: TOTAL ---
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.1.7.0.255"
+    name: "Aktueller Verbrauch"
+    id: power_delivered_id
+    unit_of_measurement: "W"
+    icon: "mdi:transmission-tower-export"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: group_total
+      sorting_weight: 10
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.2.7.0.255"
+    name: "Aktuelle Einspeisung"
+    unit_of_measurement: "W"
+    icon: "mdi:transmission-tower-import"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: group_total
+      sorting_weight: 15
+
+  - platform: total_daily_energy
+    name: "Energie Bezug Heute"
+    power_id: power_delivered_id
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 3
+    icon: "mdi:calendar-today"
+    device_class: energy
+    state_class: total_increasing
+    web_server:
+      sorting_group_id: group_total
+      sorting_weight: 30
+    filters:
+      - multiply: 0.001
+
+  # Der E450 liefert die Energie in Wh -> Umrechnung in kWh.
+  # Ein Zählerstand ist nie 0: `filter_out: 0` schützt die Home-Assistant-Statistik vor einem
+  # fehlerhaften Telegramm (siehe receive_timeout oben).
+  # Getrennte Zählerstände für HT/NT (1.8.1/1.8.2) sendet der E450 nicht, siehe README.
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "${obis_energy_channel}.1.8.0.255"
+    name: "Energie Bezug Total (1.8.0)"
+    unit_of_measurement: "kWh"
+    icon: "mdi:sigma"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 3
+    filters:
+      - filter_out: 0
+      - multiply: 0.001
+    web_server:
+      sorting_group_id: group_total
+      sorting_weight: 40
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "${obis_energy_channel}.2.8.0.255"
+    name: "Energie Einspeisung Total (2.8.0)"
+    unit_of_measurement: "kWh"
+    icon: "mdi:sigma"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 3
+    filters:
+      - filter_out: 0
+      - multiply: 0.001
+    web_server:
+      sorting_group_id: group_total
+      sorting_weight: 50
+
+  # --- GRUPPE: PHASEN ---
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.21.7.0.255"
+    name: "Verbrauch L1"
+    unit_of_measurement: "W"
+    icon: "mdi:flash"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server: {sorting_group_id: group_phases, sorting_weight: 10}
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.41.7.0.255"
+    name: "Verbrauch L2"
+    unit_of_measurement: "W"
+    icon: "mdi:flash"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server: {sorting_group_id: group_phases, sorting_weight: 20}
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.61.7.0.255"
+    name: "Verbrauch L3"
+    unit_of_measurement: "W"
+    icon: "mdi:flash"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server: {sorting_group_id: group_phases, sorting_weight: 30}
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.22.7.0.255"
+    name: "Einspeisung L1"
+    unit_of_measurement: "W"
+    icon: "mdi:flash-outline"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server: {sorting_group_id: group_phases, sorting_weight: 40}
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.42.7.0.255"
+    name: "Einspeisung L2"
+    unit_of_measurement: "W"
+    icon: "mdi:flash-outline"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server: {sorting_group_id: group_phases, sorting_weight: 50}
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.62.7.0.255"
+    name: "Einspeisung L3"
+    unit_of_measurement: "W"
+    icon: "mdi:flash-outline"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server: {sorting_group_id: group_phases, sorting_weight: 60}
+
+  # Spannung: Rohwert in V
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.32.7.0.255"
+    name: "Spannung L1"
+    unit_of_measurement: "V"
+    icon: "mdi:sine-wave"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server: {sorting_group_id: group_phases, sorting_weight: 70}
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.52.7.0.255"
+    name: "Spannung L2"
+    unit_of_measurement: "V"
+    icon: "mdi:sine-wave"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server: {sorting_group_id: group_phases, sorting_weight: 80}
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.72.7.0.255"
+    name: "Spannung L3"
+    unit_of_measurement: "V"
+    icon: "mdi:sine-wave"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server: {sorting_group_id: group_phases, sorting_weight: 90}
+
+  # Strom: Rohwert in 0.01 A
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.31.7.0.255"
+    name: "Strom L1"
+    unit_of_measurement: "A"
+    icon: "mdi:current-ac"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+    web_server: {sorting_group_id: group_phases, sorting_weight: 100}
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.51.7.0.255"
+    name: "Strom L2"
+    unit_of_measurement: "A"
+    icon: "mdi:current-ac"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+    web_server: {sorting_group_id: group_phases, sorting_weight: 110}
+
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "1.0.71.7.0.255"
+    name: "Strom L3"
+    unit_of_measurement: "A"
+    icon: "mdi:current-ac"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+    web_server: {sorting_group_id: group_phases, sorting_weight: 120}
+
+  # --- SYSTEM DIAGNOSE ---
+  - platform: internal_temperature
+    name: "CPU Temperatur"
+    icon: "mdi:thermometer"
+    web_server:
+      sorting_group_id: group_diag
+      sorting_weight: 10
+
+  - platform: wifi_signal
+    name: "WLAN Signal"
+    icon: "mdi:wifi"
+    update_interval: 60s
+    web_server:
+      sorting_group_id: group_diag
+      sorting_weight: 15
+
+text_sensor:
+  # --- GRUPPE: TOTAL ---
+  # Der E450 sendet den Tarif als Text. Bei ewb beobachtet: RATE2 von 22 bis 6 Uhr.
+  # Andere Werte werden unverändert angezeigt.
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "0.0.96.14.0.255"
+    name: "Aktueller Tarif"
+    icon: "mdi:cash-multiple"
+    filters:
+      - map:
+          - RATE1 -> Hochtarif (HT)
+          - RATE2 -> Niedertarif (NT)
+    web_server:
+      sorting_group_id: group_total
+      sorting_weight: 20
+
+  # --- GRUPPE: STROMZÄHLER ---
+  - platform: dlms_meter
+    dlms_meter_id: my_dlms
+    obis_code: "0.0.42.0.0.255"
+    name: "Zähler Identifikation"
+    icon: "mdi:barcode-scan"
+    web_server:
+      sorting_group_id: group_meter
+      sorting_weight: 10
+
+  # --- GRUPPE: DIAGNOSE GERÄT (gPlugM) ---
+  - platform: version
+    name: "ESPHome Version"
+    id: ${devicename}_esp_version
+    hide_timestamp: true
+    icon: "mdi:alpha-v-circle-outline"
+    web_server:
+      sorting_group_id: group_diag
+      sorting_weight: 20
+    # Die Version wird im Format esphome-<ESPHOME-Version> - <BUILDDATE: YYYYMMDD_HHMMSS> ausgegeben.
+    filters:
+      - lambda: |-
+          // 1. Version holen (z.B. 2025.12.7)
+          std::string version = x;
+
+          // 2. Build-Datum (__DATE__) parsen (Format ist immer "Mmm dd yyyy")
+          char m_str[4];
+          int day, year;
+          static const char month_names[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+          sscanf(__DATE__, "%s %d %d", m_str, &day, &year);
+
+          // Monat von Text in Zahl umwandeln
+          int month = (strstr(month_names, m_str) - month_names) / 3 + 1;
+
+          // 3. Build-Uhrzeit (__TIME__) parsen (Format ist "hh:mm:ss")
+          int hour, min, sec;
+          sscanf(__TIME__, "%d:%d:%d", &hour, &min, &sec);
+
+          // 4. In Zielformat schreiben: YYYYMMDD_HHMMSS
+          char buf[20];
+          sprintf(buf, "%04d%02d%02d_%02d%02d%02d", year, month, day, hour, min, sec);
+
+          return {"esphome-" + version + " - " + std::string(buf)};
+
+  - platform: wifi_info
+    ip_address:
+      name: "WLAN IP-Adresse"
+      icon: "mdi:ip-network"
+      web_server:
+        sorting_group_id: group_diag
+        sorting_weight: 30
+    mac_address:
+      name: "WLAN MAC-Adresse"
+      icon: "mdi:fingerprint"
+      web_server:
+        sorting_group_id: group_diag
+        sorting_weight: 40
